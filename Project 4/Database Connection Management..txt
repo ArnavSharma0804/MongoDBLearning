@@ -1,0 +1,245 @@
+Database Connection Management.
+
+import com.mongodb.ConnectionString;
+import com.mongodb.MongoClientSettings;
+import com.mongodb.client.MongoClient;
+import com.mongodb.client.MongoClients;
+import com.mongodb.client.MongoDatabase;
+import java.util.concurrent.TimeUnit;
+
+public class DatabaseManager {
+    private static MongoClient mongoClient;
+    private static final String CONNECTION_STRING = "mongodb://localhost:27017/?replicaSet=rs0"; // or Atlas connection string
+
+    public static synchronized MongoClient getClient() {
+        if (mongoClient == null) {
+            MongoClientSettings settings = MongoClientSettings.builder()
+                .applyConnectionString(new ConnectionString(CONNECTION_STRING))
+                .applyToConnectionPoolSettings(builder -> 
+                    builder.maxSize(50)                   // Max connection pool size
+                           .minSize(10)                   // Minimum idle connections
+                           .maxWaitTime(2000, TimeUnit.MILLISECONDS))
+                .build();
+            mongoClient = MongoClients.create(settings);
+        }
+        return mongoClient;
+    }
+
+    public static MongoDatabase getDatabase(String dbName) {
+        return getClient().getDatabase(dbName);
+    }
+}
+
+-----x-----x-----x------x-----x------x------x-----x-----x-----x-----x-----x-----x-----x-----x-----x-----x-----
+
+Implementation of CRUD Operation
+
+import com.mongodb.client.MongoCollection;
+import com.mongodb.client.MongoDatabase;
+import com.mongodb.client.model.Filters;
+import com.mongodb.client.model.Updates;
+import com.mongodb.client.result.DeleteResult;
+import com.mongodb.client.result.UpdateResult;
+import org.bson.Document;
+import org.bson.types.ObjectId;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class UserRepository {
+    private final MongoCollection<Document> collection;
+
+    public UserRepository(MongoDatabase database) {
+        this.collection = database.getCollection("users");
+    }
+
+    // CREATE: Single Document
+    public String createUser(String name, String email, int age) {
+        Document user = new Document("_id", new ObjectId())
+                .append("name", name)
+                .append("email", email)
+                .append("age", age)
+                .append("status", "ACTIVE");
+        collection.insertOne(user);
+        return user.getObjectId("_id").toHexString();
+    }
+
+    // READ: Find by Email
+    public Document findByEmail(String email) {
+        return collection.find(Filters.eq("email", email)).first();
+    }
+
+    // READ: Find all Active Users aged > minAge
+    public List<Document> findActiveUsersOlderThan(int minAge) {
+        List<Document> users = new ArrayList<>();
+        collection.find(Filters.and(
+                Filters.eq("status", "ACTIVE"),
+                Filters.gt("age", minAge)
+        )).into(users);
+        return users;
+    }
+
+    // UPDATE: Update User Email and Increment Age
+    public boolean updateUser(String email, String newEmail, int ageIncrement) {
+        UpdateResult result = collection.updateOne(
+                Filters.eq("email", email),
+                Updates.combine(
+                        Updates.set("email", newEmail),
+                        Updates.inc("age", ageIncrement)
+                )
+        );
+        return result.getModifiedCount() > 0;
+    }
+
+    // DELETE: Delete by User ID
+    public boolean deleteUserById(String id) {
+        DeleteResult result = collection.deleteOne(Filters.eq("_id", new ObjectId(id)));
+        return result.getDeletedCount() > 0;
+    }
+}
+
+-----x-----x-----x------x-----x------x------x-----x-----x-----x-----x-----x-----x-----x-----x-----x-----x-----
+
+
+Designing Queries and Indexes for Optimal Performance
+
+import com.mongodb.client.MongoCollection;
+import com.mongodb.client.model.IndexOptions;
+import com.mongodb.client.model.Indexes;
+import org.bson.Document;
+
+public class IndexConfiguration {
+    public static void setupIndexes(MongoCollection<Document> collection) {
+        // 1. Unique Single-Field Index (Faster lookups, prevents duplicates)
+        collection.createIndex(
+            Indexes.ascending("email"), 
+            new IndexOptions().unique(true)
+        );
+
+        // 2. Compound Index (Following ESR Rule: Equality -> Sort -> Range)
+        // Filters on status (Equality) and sorts/ranges on age
+        collection.createIndex(
+            Indexes.compoundIndex(
+                Indexes.ascending("status"),
+                Indexes.descending("age")
+            )
+        );
+    }
+}
+
+
+Best Practices for Query Optimization
+
+ESR Rule (Equality, Sort, Range): Order fields in compound indexes by Equality first, Sort keys second, and Range filters last.
+
+2) Projections: Only retrieve required fields to minimize network overhead and memory usage:
+
+
+collection.find(Filters.eq("status", "ACTIVE"))
+          .projection(Projections.fields(Projections.include("name", "email"), Projections.excludeId()));
+
+
+3) Bulk Write Operations: Execute multi-document mutations using bulkWrite() to reduce round trips.
+
+4) Query Execution Plan (explain()): Inspect performance directly using VS Code MongoDB Extension or via Java Driver:
+
+
+Document plan = collection.find(Filters.eq("email", "test@example.com"))
+                          .explain();
+System.out.println(plan.toJson());
+
+
+-----x-----x-----x------x-----x------x------x-----x-----x-----x-----x-----x-----x-----x-----x-----x-----x-----
+Replication Strategy & Read/Write Concerns
+import com.mongodb.ReadPreference;
+import com.mongodb.WriteConcern;
+import com.mongodb.client.MongoCollection;
+import org.bson.Document;
+
+// Configure Read Preference and Write Concern at Database/Collection level
+MongoCollection<Document> resilientCollection = database.getCollection("orders")
+    .withWriteConcern(WriteConcern.MAJORITY.withwTimeout(5000, TimeUnit.MILLISECONDS)) // Wait for majority confirmation
+    .withReadPreference(ReadPreference.secondaryPreferred()); // Offload reads to secondaries
+
+
+-----x-----x-----x------x-----x------x------x-----x-----x-----x-----x-----x-----x-----x-----x-----x-----x-----
+
+Backup and Recovery Strategies
+# Run dump from a secondary node with oplog capture for point-in-time recovery
+mongodump --uri="mongodb://secondary.example.com:27017/myDatabase?readPreference=secondary" --oplog --out=/var/backups/$(date +%Y%m%d)
+
+# Restore backup
+mongorestore --uri="mongodb://localhost:27017" /var/backups/20260330/
+
+-----x-----x-----x------x-----x------x------x-----x-----x-----x-----x-----x-----x-----x-----x-----x-----x-----
+
+Deployment and Testing
+xml:
+<dependency>
+    <groupId>org.testcontainers</groupId>
+    <artifactId>mongodb</artifactId>
+    <version>1.19.7</version>
+    <scope>test</scope>
+</dependency>
+<dependency>
+    <groupId>org.junit.jupiter</groupId>
+    <artifactId>junit-jupiter</artifactId>
+    <version>5.10.2</version>
+    <scope>test</scope>
+</dependency>
+
+Integration Test Implementation:
+import com.mongodb.client.MongoClient;
+import com.mongodb.client.MongoClients;
+import com.mongodb.client.MongoDatabase;
+import org.bson.Document;
+import org.junit.jupiter.api.*;
+import org.testcontainers.containers.MongoDBContainer;
+import org.testcontainers.utility.DockerImageName;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class UserRepositoryTest {
+    static MongoDBContainer mongoDBContainer = new MongoDBContainer(DockerImageName.parse("mongo:7.0"));
+    static MongoClient mongoClient;
+    static UserRepository repository;
+
+    @BeforeAll
+    static void startContainer() {
+        mongoDBContainer.start();
+        mongoClient = MongoClients.create(mongoDBContainer.getReplicaSetUrl());
+        MongoDatabase db = mongoClient.getDatabase("testdb");
+        repository = new UserRepository(db);
+    }
+
+    @AfterAll
+    static void stopContainer() {
+        mongoClient.close();
+        mongoDBContainer.stop();
+    }
+
+    @Test
+    void testCreateAndFindUser() {
+        String id = repository.createUser("Alice Doe", "alice@example.com", 28);
+        assertNotNull(id);
+
+        Document user = repository.findByEmail("alice@example.com");
+        assertNotNull(user);
+        assertEquals("Alice Doe", user.getString("name"));
+    }
+}
+
+-----x-----x-----x------x-----x------x------x-----x-----x-----x-----x-----x-----x-----x-----x-----x-----x-----
+
+Deployment Pipeline
+Containerization (Dockerfile):
+Dockerfile:
+FROM eclipse-temurin:21-jdk-alpine AS build
+WORKDIR /app
+COPY . .
+RUN ./mvnw clean package -DskipTests
+
+FROM eclipse-temurin:21-jre-alpine
+WORKDIR /app
+COPY --from=build /app/target/*.jar app.jar
+ENTRYPOINT ["java", "-jar", "app.jar"]
